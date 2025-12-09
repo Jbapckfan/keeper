@@ -1,0 +1,909 @@
+// packages/database/prisma/schema.prisma
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["fullTextSearch", "postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector"), pg_trgm]
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  emailVerified     DateTime?
+  passwordHash      String?
+  name              String?
+  avatarUrl         String?
+
+  // Subscription
+  subscriptionTier  SubscriptionTier @default(FREE)
+  subscriptionId    String?          // Stripe subscription ID
+  subscriptionEnd   DateTime?
+
+  // Limits & Usage
+  productCount      Int       @default(0)
+  aiQuestionsUsed   Int       @default(0)
+  aiQuestionsReset  DateTime?
+
+  // Preferences
+  currency          String    @default("USD")
+  timezone          String    @default("America/New_York")
+  notifyWarranty    Boolean   @default(true)
+  notifyMaintenance Boolean   @default(true)
+  notifyRecalls     Boolean   @default(true)
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastLoginAt       DateTime?
+
+  // Relations
+  accounts          Account[]
+  sessions          Session[]
+  products          Product[]
+  receipts          Receipt[]
+  notifications     Notification[]
+  aiConversations   AIConversation[]
+  referralCode      ReferralCode?
+  referredBy        ReferralCode?    @relation("ReferredUsers", fields: [referredById], references: [id])
+  referredById      String?
+  teamMemberships   TeamMember[]
+
+  @@index([email])
+  @@index([subscriptionTier])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  userAgent    String?
+  ipAddress    String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum SubscriptionTier {
+  FREE
+  PLUS
+  PRO
+  BUSINESS
+}
+
+// ============================================
+// PRODUCTS & RECEIPTS
+// ============================================
+
+model Product {
+  id                String    @id @default(cuid())
+  userId            String
+
+  // Basic Info
+  name              String
+  brand             String?
+  model             String?
+  serialNumber      String?
+  category          ProductCategory
+
+  // Purchase Info
+  purchaseDate      DateTime?
+  purchasePrice     Decimal?  @db.Decimal(10, 2)
+  purchaseLocation  String?
+
+  // Warranty Info
+  warrantyMonths    Int?
+  warrantyExpires   DateTime?
+  warrantyType      WarrantyType @default(STANDARD)
+  warrantyStatus    WarrantyStatus @default(UNKNOWN)
+  warrantyRegistered Boolean @default(false)
+  warrantyRegisteredAt DateTime?
+  extendedWarrantyId String?
+
+  // Product Health (0-100 score)
+  healthScore       Int?
+  healthUpdatedAt   DateTime?
+  expectedLifespan  Int?      // months
+
+  // Media
+  productImageUrl   String?
+  receiptImageUrl   String?
+
+  // Location/Assignment
+  location          String?   // "Kitchen", "Garage", etc.
+  assignedTo        String?   // Family member name
+
+  // Metadata
+  notes             String?   @db.Text
+  tags              String[]
+  customFields      Json?
+
+  // Status
+  status            ProductStatus @default(ACTIVE)
+  disposedAt        DateTime?
+  disposalReason    String?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  receipt           Receipt?  @relation(fields: [receiptId], references: [id])
+  receiptId         String?
+  manual            Manual?   @relation(fields: [manualId], references: [id])
+  manualId          String?
+  manufacturer      Manufacturer? @relation(fields: [manufacturerId], references: [id])
+  manufacturerId    String?
+  maintenanceLogs   MaintenanceLog[]
+  smartActions      SmartAction[]
+  warrantyClaimAttempts WarrantyClaim[]
+  extendedWarranty  ExtendedWarranty? @relation(fields: [extendedWarrantyId], references: [id])
+
+  @@index([userId])
+  @@index([category])
+  @@index([warrantyExpires])
+  @@index([healthScore])
+  @@index([brand, model])
+}
+
+model Receipt {
+  id                String    @id @default(cuid())
+  userId            String
+
+  // OCR Extracted Data
+  merchantName      String?
+  merchantAddress   String?
+  purchaseDate      DateTime?
+  totalAmount       Decimal?  @db.Decimal(10, 2)
+  taxAmount         Decimal?  @db.Decimal(10, 2)
+  subtotal          Decimal?  @db.Decimal(10, 2)
+  paymentMethod     String?
+  currency          String    @default("USD")
+
+  // Line Items (JSON for flexibility)
+  lineItems         Json?     // Array of {name, quantity, price, sku?}
+
+  // Images
+  originalImageUrl  String
+  processedImageUrl String?
+  thumbnailUrl      String?
+
+  // Processing Status
+  ocrStatus         OCRStatus @default(PENDING)
+  ocrConfidence     Float?
+  ocrRawText        String?   @db.Text
+  ocrProcessedAt    DateTime?
+  ocrEngine         String?   // "tesseract", "google_vision"
+
+  // Classification
+  category          ExpenseCategory?
+  isBusinessExpense Boolean   @default(false)
+
+  // Source
+  source            ReceiptSource @default(CAMERA)
+  emailMessageId    String?   // If from email forwarding
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  products          Product[]
+
+  @@index([userId])
+  @@index([merchantName])
+  @@index([purchaseDate])
+  @@index([ocrStatus])
+}
+
+enum ProductCategory {
+  APPLIANCE_MAJOR
+  APPLIANCE_SMALL
+  ELECTRONICS_TV
+  ELECTRONICS_AUDIO
+  ELECTRONICS_COMPUTER
+  ELECTRONICS_PHONE
+  ELECTRONICS_CAMERA
+  ELECTRONICS_GAMING
+  ELECTRONICS_OTHER
+  FURNITURE
+  OUTDOOR_POWER
+  OUTDOOR_GARDEN
+  TOOLS_POWER
+  TOOLS_HAND
+  HVAC
+  PLUMBING
+  AUTOMOTIVE
+  SPORTS_FITNESS
+  TOYS_GAMES
+  JEWELRY_WATCH
+  CLOTHING_SHOES
+  HOME_DECOR
+  KITCHEN_COOKWARE
+  BABY_KIDS
+  PETS
+  HEALTH_MEDICAL
+  OTHER
+}
+
+enum WarrantyType {
+  STANDARD
+  EXTENDED
+  LIMITED
+  LIFETIME
+  NONE
+}
+
+enum WarrantyStatus {
+  ACTIVE
+  EXPIRED
+  CLAIMED
+  VOIDED
+  UNKNOWN
+}
+
+enum ProductStatus {
+  ACTIVE
+  DISPOSED
+  SOLD
+  RETURNED
+  LOST
+  DAMAGED
+}
+
+enum OCRStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  MANUAL_REVIEW
+}
+
+enum ReceiptSource {
+  CAMERA
+  UPLOAD
+  EMAIL
+  IMPORT
+}
+
+enum ExpenseCategory {
+  GROCERIES
+  DINING
+  ELECTRONICS
+  HOME_IMPROVEMENT
+  AUTOMOTIVE
+  HEALTHCARE
+  CLOTHING
+  ENTERTAINMENT
+  TRAVEL
+  UTILITIES
+  INSURANCE
+  SUBSCRIPTION
+  OFFICE_SUPPLIES
+  PROFESSIONAL_SERVICES
+  OTHER
+}
+
+// ============================================
+// MANUALS & MANUFACTURER DATA
+// ============================================
+
+model Manual {
+  id                String    @id @default(cuid())
+
+  // Product Matching
+  brand             String
+  model             String?
+  productName       String
+
+  // File Info
+  fileUrl           String
+  fileSize          Int?      // bytes
+  pageCount         Int?
+  language          String    @default("en")
+
+  // Content for AI
+  textContent       String?   @db.Text
+  embedding         Unsupported("vector(1536)")?
+
+  // Metadata
+  manualType        ManualType @default(USER_MANUAL)
+  year              Int?
+  version           String?
+
+  // Source
+  source            ManualSource
+  sourceUrl         String?
+  contributorId     String?   // User who contributed
+
+  // Quality
+  qualityScore      Int?      // 1-5
+  downloadCount     Int       @default(0)
+  helpfulCount      Int       @default(0)
+
+  // Status
+  isVerified        Boolean   @default(false)
+  verifiedAt        DateTime?
+  verifiedBy        String?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  manufacturer      Manufacturer? @relation(fields: [manufacturerId], references: [id])
+  manufacturerId    String?
+  products          Product[]
+
+  @@unique([brand, model, manualType])
+  @@index([brand])
+  @@index([model])
+  @@index([productName])
+}
+
+model Manufacturer {
+  id                String    @id @default(cuid())
+
+  // Basic Info
+  name              String    @unique
+  aliases           String[]  // Alternative names
+  logoUrl           String?
+  websiteUrl        String?
+
+  // Support Info
+  supportPhone      String?
+  supportEmail      String?
+  supportUrl        String?
+  supportHours      String?
+
+  // Warranty Registration
+  warrantyRegUrl    String?
+  warrantyRegMethod WarrantyRegMethod?
+  warrantyApiEnabled Boolean  @default(false)
+
+  // Quality Metrics
+  avgWarrantyMonths Int?
+  reliabilityScore  Int?      // 1-100
+
+  // Partner Status
+  isPartner         Boolean   @default(false)
+  partnerTier       String?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  products          Product[]
+  manuals           Manual[]
+
+  @@index([name])
+}
+
+enum ManualType {
+  USER_MANUAL
+  QUICK_START
+  INSTALLATION
+  SERVICE_MANUAL
+  PARTS_LIST
+  WARRANTY_INFO
+  SAFETY_INFO
+  SPEC_SHEET
+}
+
+enum ManualSource {
+  CURATED
+  USER_CONTRIBUTED
+  PARTNER
+  IMPORT
+}
+
+enum WarrantyRegMethod {
+  WEB_FORM
+  EMAIL
+  API
+  PHONE
+  MAIL
+}
+
+// ============================================
+// MAINTENANCE & PRODUCT HEALTH
+// ============================================
+
+model MaintenanceLog {
+  id                String    @id @default(cuid())
+  productId         String
+
+  // Maintenance Info
+  type              MaintenanceType
+  description       String
+  performedAt       DateTime
+  performedBy       String?   // "Self", technician name
+
+  // Cost Tracking
+  cost              Decimal?  @db.Decimal(10, 2)
+  laborCost         Decimal?  @db.Decimal(10, 2)
+  partsCost         Decimal?  @db.Decimal(10, 2)
+
+  // Parts Used
+  partsUsed         Json?     // Array of {name, partNumber?, cost?}
+
+  // Service Provider
+  serviceProvider   String?
+  serviceOrderNumber String?
+
+  // Documentation
+  receiptUrl        String?
+  notes             String?   @db.Text
+
+  // Next Maintenance
+  nextDueDate       DateTime?
+  reminderSent      Boolean   @default(false)
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([performedAt])
+  @@index([nextDueDate])
+}
+
+model SmartAction {
+  id                String    @id @default(cuid())
+  productId         String
+
+  // Action Details
+  type              SmartActionType
+  title             String
+  description       String
+
+  // Priority (1-5, 5 = highest)
+  priority          Int       @default(3)
+  urgency           ActionUrgency @default(MEDIUM)
+
+  // Timing
+  dueDate           DateTime?
+  reminderDate      DateTime?
+
+  // Status
+  status            ActionStatus @default(PENDING)
+  completedAt       DateTime?
+  dismissedAt       DateTime?
+  snoozedUntil      DateTime?
+
+  // Metadata
+  metadata          Json?     // Action-specific data
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([status])
+  @@index([dueDate])
+  @@index([priority])
+}
+
+enum MaintenanceType {
+  PREVENTIVE
+  CORRECTIVE
+  CLEANING
+  INSPECTION
+  REPLACEMENT
+  UPGRADE
+  CALIBRATION
+  OTHER
+}
+
+enum SmartActionType {
+  WARRANTY_EXPIRING
+  WARRANTY_REGISTER
+  MAINTENANCE_DUE
+  RECALL_ALERT
+  PRODUCT_UPDATE
+  CLAIM_OPPORTUNITY
+  REPLACEMENT_SUGGESTION
+  COST_INSIGHT
+  MANUAL_AVAILABLE
+}
+
+enum ActionUrgency {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ActionStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  DISMISSED
+  SNOOZED
+}
+
+// ============================================
+// WARRANTY CLAIMS
+// ============================================
+
+model WarrantyClaim {
+  id                String    @id @default(cuid())
+  productId         String
+
+  // Claim Details
+  issueDescription  String    @db.Text
+  issueDate         DateTime
+  claimDate         DateTime  @default(now())
+
+  // Status Tracking
+  status            ClaimStatus @default(DRAFT)
+  statusHistory     Json?     // Array of {status, date, notes}
+
+  // Manufacturer Response
+  claimNumber       String?
+  responseDate      DateTime?
+  resolution        String?
+
+  // Outcome
+  outcome           ClaimOutcome?
+  replacementValue  Decimal?  @db.Decimal(10, 2)
+  refundAmount      Decimal?  @db.Decimal(10, 2)
+
+  // Documentation
+  photoUrls         String[]
+  documentUrls      String[]
+  communicationLog  Json?     // Array of {date, type, content}
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  resolvedAt        DateTime?
+
+  // Relations
+  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([status])
+  @@index([claimDate])
+}
+
+enum ClaimStatus {
+  DRAFT
+  SUBMITTED
+  ACKNOWLEDGED
+  UNDER_REVIEW
+  APPROVED
+  DENIED
+  RESOLVED
+  CLOSED
+}
+
+enum ClaimOutcome {
+  REPAIR
+  REPLACEMENT
+  REFUND
+  PARTIAL_REFUND
+  CREDIT
+  DENIED
+  WITHDRAWN
+}
+
+// ============================================
+// EXTENDED WARRANTIES
+// ============================================
+
+model ExtendedWarranty {
+  id                String    @id @default(cuid())
+
+  // Provider Info
+  provider          String    // "Asurion", "Extend", etc.
+  planName          String
+  planId            String?
+
+  // Coverage
+  coverageMonths    Int
+  coverageStart     DateTime
+  coverageEnd       DateTime
+  maxClaimAmount    Decimal?  @db.Decimal(10, 2)
+  deductible        Decimal?  @db.Decimal(10, 2)
+
+  // Cost
+  premium           Decimal   @db.Decimal(10, 2)
+
+  // Documentation
+  contractUrl       String?
+  confirmationNumber String?
+
+  // Status
+  status            ExtendedWarrantyStatus @default(ACTIVE)
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  products          Product[]
+
+  @@index([provider])
+  @@index([coverageEnd])
+}
+
+enum ExtendedWarrantyStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  CLAIMED
+}
+
+// ============================================
+// AI CONVERSATIONS
+// ============================================
+
+model AIConversation {
+  id                String    @id @default(cuid())
+  userId            String
+
+  // Context
+  productId         String?
+  manualId          String?
+  topic             String?
+
+  // Messages
+  messages          Json      // Array of {role, content, timestamp}
+  messageCount      Int       @default(0)
+
+  // AI Stats
+  tokensUsed        Int       @default(0)
+  model             String    @default("gpt-4o-mini")
+
+  // Status
+  status            ConversationStatus @default(ACTIVE)
+
+  // Satisfaction
+  rating            Int?      // 1-5
+  feedback          String?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastMessageAt     DateTime  @default(now())
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([productId])
+  @@index([createdAt])
+}
+
+enum ConversationStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id                String    @id @default(cuid())
+  userId            String
+
+  // Content
+  type              NotificationType
+  title             String
+  body              String
+  data              Json?     // Additional payload
+
+  // Delivery
+  channels          NotificationChannel[]
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+
+  // Interaction
+  readAt            DateTime?
+  actionTaken       String?
+  actionTakenAt     DateTime?
+
+  // Scheduling
+  scheduledFor      DateTime?
+
+  // Status
+  status            NotificationStatus @default(PENDING)
+  failureReason     String?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([scheduledFor])
+}
+
+enum NotificationType {
+  WARRANTY_EXPIRING_30
+  WARRANTY_EXPIRING_7
+  WARRANTY_EXPIRED
+  MAINTENANCE_DUE
+  RECALL_ALERT
+  CLAIM_UPDATE
+  PRODUCT_TIP
+  SYSTEM_ANNOUNCEMENT
+  WELCOME
+  SUBSCRIPTION_RENEWAL
+}
+
+enum NotificationChannel {
+  IN_APP
+  PUSH
+  EMAIL
+  SMS
+}
+
+enum NotificationStatus {
+  PENDING
+  SCHEDULED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// ============================================
+// TEAMS (Business Tier)
+// ============================================
+
+model Team {
+  id                String    @id @default(cuid())
+
+  // Basic Info
+  name              String
+  slug              String    @unique
+
+  // Subscription
+  subscriptionId    String?
+
+  // Settings
+  settings          Json?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  members           TeamMember[]
+
+  @@index([slug])
+}
+
+model TeamMember {
+  id                String    @id @default(cuid())
+  teamId            String
+  userId            String
+
+  // Role
+  role              TeamRole  @default(MEMBER)
+
+  // Permissions
+  canAddProducts    Boolean   @default(true)
+  canEditProducts   Boolean   @default(true)
+  canDeleteProducts Boolean   @default(false)
+  canManageTeam     Boolean   @default(false)
+
+  // Timestamps
+  joinedAt          DateTime  @default(now())
+
+  // Relations
+  team              Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@index([teamId])
+  @@index([userId])
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ============================================
+// REFERRALS
+// ============================================
+
+model ReferralCode {
+  id                String    @id @default(cuid())
+  userId            String    @unique
+
+  // Code
+  code              String    @unique
+
+  // Stats
+  uses              Int       @default(0)
+  maxUses           Int?      // null = unlimited
+
+  // Rewards
+  rewardMonths      Int       @default(1)
+  rewardsEarned     Int       @default(0)
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  expiresAt         DateTime?
+
+  // Relations
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  referredUsers     User[]    @relation("ReferredUsers")
+
+  @@index([code])
+}
+
+// ============================================
+// ANALYTICS & EVENTS
+// ============================================
+
+model AnalyticsEvent {
+  id                String    @id @default(cuid())
+  userId            String?
+
+  // Event Info
+  event             String
+  properties        Json?
+
+  // Context
+  sessionId         String?
+  deviceId          String?
+  platform          String?   // "web", "ios", "android"
+  version           String?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+
+  @@index([userId])
+  @@index([event])
+  @@index([createdAt])
+}
