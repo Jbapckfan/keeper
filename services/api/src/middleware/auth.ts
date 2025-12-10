@@ -17,11 +17,23 @@ declare global {
   }
 }
 
+// Dev mode user for testing without auth
+const DEV_USER: AuthPayload = {
+  userId: 'dev-user-id',
+  email: 'dev@keeper.local',
+};
+
 export async function authenticate(
   req: Request,
   res: Response,
   next: NextFunction
 ) {
+  // DEV MODE: Skip auth in development
+  if (config.nodeEnv === 'development') {
+    req.user = DEV_USER;
+    return next();
+  }
+
   try {
     const authHeader = req.headers.authorization;
 

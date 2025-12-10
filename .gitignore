@@ -40,3 +40,5 @@ packages/database/prisma/migrations/**/migration.sql
 
 # Generated
 packages/database/src/generated
+uploads/
+*.traineddata
